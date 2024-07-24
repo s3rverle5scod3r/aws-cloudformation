@@ -20,10 +20,31 @@ Parameters:
   #Version, to be supplied in format : {release}.{major}.{minor} (0.0.1)
   Version:
     Type: String
+
+Mappings: 
+  # Api Gateway log level, where:
+  # 1: Debug (Display any severity)
+  # 2: Info (Ignores debug)
+  # 3: Warning (Ignores info and prior)
+  # 4: Error (Ignores warning and prior)
+  ApiGatewayEnvironmentLogLevel:
+    Environment:
+      dev: INFO
+      test: INFO
+      stage: INFO
+      prod: ERROR
+
+  LambdaArnToEnvironment:
+    # example format : arn:aws:lambda:{Region}:{AccountId}:function:{LambdaName}
+    Environment:
+      dev: tbc
+      test: tbc 
+      stage: tbc
+      prod: tbc
   
-Mappings:
   #KMS key per environment for encryption/decryption
   KmsKeyArnToEnvironment:
+    # example format : arn:aws:kms:{Region}:{AccountId}:key/{KeyId}
     Environment:
       dev: tbc
       test: tbc 
@@ -33,8 +54,330 @@ Mappings:
 Conditions:
   EnvironmentIsProd: !Equals [ !Ref Environment, prod ]
   EnvironmentIsStageOrProd: !Or [ !Equals [ !Ref Environment, stage ], !Equals [ !Ref Environment, prod ] ]
- 
+
 Resources:
+  # API Gateway Components
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties: 
+      Name: !Sub '${Environment}-api-gateway'
+      Description: Api Gateway Description.
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      ApiKeySourceType: HEADER
+      FailOnWarnings: true
+      Body:
+        swagger: "2.0"
+        info:
+          description: Api Gateway Description.
+          version: v1
+          title: !Sub "${Environment}-api-gateway"
+        basePath: !Sub '/${Environment}'
+        schemes:
+          - "https"
+        paths:
+          /{version}/apigateway/request:
+            post:
+              consumes:
+                - "application/json"
+              produces:
+                - "application/json"
+              RequestParameters:
+                - name: "reference"
+                  in: "body"
+                  required: true
+                  schema:
+                    $ref: "#/definitions/Request"
+                - name: "brand"
+                  in: "body"
+                  required: true
+                  schema:
+                    $ref: "#/definitions/Request"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Success"
+              security:
+              - api_key: []
+              x-amazon-apigateway-request-validator: default
+              x-amazon-apigateway-integration:
+                uri: !Sub
+                  - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations"
+                  - LambdaArn: !FindInMap [LambdaArnToEnvironment, "Environment", !Ref Environment ]
+                responses:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "NEVER"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws_proxy"
+        securityDefinitions:
+          api_key:
+            type: "apiKey"
+            name: "x-api-key"
+            in: "header"
+        definitions:
+          # Schema for error responses
+          Error:
+            type: "object"
+            title: "Error Schema"
+            properties:
+              message:
+                type: "string"
+          # Schema for incoming requests
+          Request:
+            type: "object"
+            title: "Request validation schema."
+            properties:
+              reference:
+                type: "string"
+                description: "The reference to action the request against."
+                pattern: "(^([0-9]{2,5})-([0-9]{3})-([0-9]{2,5})$)" # Example : 12345-123-12345
+              brand:
+                type: "string"
+                description: "The brand identified by the reference"
+                enum:
+                  - "brandA"
+                  - "brandB"
+                  - "brandC"
+            required:
+              - "reference"
+              - "brand"
+          # Schema for successful responses
+          Success:
+            type: "object"
+            title: "Success Schema"
+        x-amazon-apigateway-policy:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: "*"
+            - Effect: "Deny"
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: "*"
+              # Authorise specific soure IPs/Ranges only
+              Condition:
+                NotIpAddress:
+                  aws:SourceIp: [
+                    # IP Address
+                    "00.00.00.00",
+                    # Coditioned IP statement based on Environment
+                    !If [ EnvironmentIsStageOrProd, "12.345.678.90/123", !Ref AWS::NoValue ]
+                  ]
+        x-amazon-apigateway-request-validators:
+          default:
+            validateRequestBody: true
+            validateRequestParameters: true
+        x-amazon-apigateway-request-validator: default
+      Tags: 
+          - Key: Alias
+            Value: !Ref Alias
+          - Key: Environment
+            Value: !Ref Environment
+          - Key: Version
+            Value: !Sub '${Version}'
+
+  RestApiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            # Allow API Gateway to assume role
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "apigateway.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    Policies:
+      - PolicyName: !Sub '${Environment}-api-gateway-iam-policy'
+        PolicyDocument: {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              # Allow log access
+              "Sid": "ExecutionPerms",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:DescribeLogGroups",
+                "logs:DescribeLogStreams",
+                "logs:PutLogEvents",
+                "logs:GetLogEvents",
+                "logs:FilterLogEvents"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+    Description: IAM role for api-gateway.
+    RoleName: !Sub '${Environment}api-gateway-iam-role'
+
+  # Deployment for api-gateway
+  RestApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref RestApi
+      Description: !Sub '${Environment} deployment for api-gateway version ${Version}'
+
+  # Stage for api-gateway
+  RestApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      Description: !Sub '${Environment} deployment stage for api-gateway.'
+      DeploymentId: !Ref RestApiDeployment
+      MethodSettings:
+        - ResourcePath: /{version}/apigateway/request
+          HttpMethod: POST
+          MetricsEnabled: true
+          DataTraceEnabled: true
+          ThrottlingBurstLimit: 500
+          ThrottlingRateLimit: 1000
+          LoggingLevel: !FindInMap [ StageLoggingLevelToEnvironment, Environment, !Ref Environment ]
+      RestApiId: !Ref RestApi
+      StageName: !Ref Environment
+      Variables:
+        LAMBDA_NAME: !FindInMap [ "LambdaArnToEnvironment", "Environment", !Ref Environment ]
+      Tags: 
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Sub '${Version}'
+
+  # api-gateway API key for internal use
+  RestApiInternalKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: RestApiStage
+    Properties:
+      Description: api-gateway API key for internal use.
+      Enabled: true
+      Name: !Sub '${Environment}-api-gateway-internal-key'
+      StageKeys: 
+        - RestApiId: !Ref RestApi
+          StageName: !Ref Environment
+      Tags: 
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Sub '${Version}'
+
+  # api-gateway API key for external/third-party use
+  RestApiExternalKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: RestApiStage
+    Properties:
+      Description: api-gateway API key for external/third-party use.
+      Enabled: true
+      Name: !Sub '${Environment}-api-gateway-external-key'
+      StageKeys: 
+        - RestApiId: !Ref RestApi
+          StageName: !Ref Environment
+      Tags: 
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Sub '${Version}'
+
+  # api-gateway API Usage plan for internal use
+  RestApiUsageInternalPlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - RestApiStage
+    Properties: 
+      ApiStages: 
+        - ApiId: !Ref RestApi
+          Stage: !Ref Environment
+      Description: api-gateway API usage plan for internal use.
+      Tags: 
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Sub '${Version}'
+      UsagePlanName: !Sub '${Environment}-api-gateway-internal-plan'
+
+  # api-gateway API Usage plan for external/third-party use
+  RestApiUsageExternalPlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - RestApiStage
+    Properties: 
+      ApiStages: 
+        - ApiId: !Ref RestApi
+          Stage: !Ref Environment
+      Description: api-gateway API usage plan for external/third-party use.
+      Tags: 
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Sub '${Version}'
+      UsagePlanName: !Sub '${Environment}-api-gateway-external-plan'
+
+  # Link api-gateway internal API key and usage plan
+  RestApiLinkInternalUsagePlanAndKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    Properties:
+      KeyId: !Ref RestApiInternalKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref RestApiUsageInternalPlan
+
+  # Link api-gateway external/third-party API key and usage plan
+  RestApiLinkExternalUsagePlanAndKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    Properties:
+      KeyId: !Ref RestApiExternalKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref RestApiUsageExternalPlan
   
+  # Permission to allow api-gateway to execute lambda
+  ApiGatewayLambdaExePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !FindInMap [ "LambdaArnToEnvironment", "Environment", !Ref Environment ]
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join [ '', [ 'arn:aws:execute-api:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':', !Ref RestApi, '/*/POST/*/apigateway/*' ] ]
+
 Outputs:
-  
+  RestApiId:
+    Description: "The id of the api-gateway."
+    Value: !Ref RestApi
+    Export:
+      Name: !Sub "${AWS::StackName}-RestApiId"
+
+  RestApiRootResourceId:
+    Description: "The root resource id of the api-gateway."
+    Value: !GetAtt RestApi.RootResourceId
+    Export:
+      Name: !Sub "${AWS::StackName}-RestApiRootResourceId"
+
+  RestApiEndpoint:
+    Description: "The endpoint url of the api-gateway."
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-RestApiEndpoint"
+
+  RestApiStageName:
+    Description: "The name of the deployment stage for the api-gateway."
+    Value: !Ref RestApiStage
+    Export:
+      Name: !Sub "${AWS::StackName}-RestApiStageName"
