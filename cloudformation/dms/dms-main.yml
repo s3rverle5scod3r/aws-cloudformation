@@ -24,6 +24,7 @@ Parameters:
 Mappings:
   #KMS key per environment for encryption/decryption
   KmsKeyArnToEnvironment:
+     # example format : arn:aws:kms:{Region}:{AccountId}:key/{KeyId}
     Environment:
       dev: tbc
       test: tbc 
@@ -33,8 +34,57 @@ Mappings:
 Conditions:
   EnvironmentIsProd: !Equals [ !Ref Environment, prod ]
   EnvironmentIsStageOrProd: !Or [ !Equals [ !Ref Environment, stage ], !Equals [ !Ref Environment, prod ] ]
- 
+
 Resources:
+  DmsReplicationSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupDescription: "DMS subnet group"
+      ReplicationSubnetGroupIdentifier: "dms-subnet-group"
+      SubnetIds:
+        - subnet-1234a567
+        - subnet-1234b567
+        - subnet-1234c567
   
+  DmsReplicationInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Properties:
+      AllocatedStorage: 50
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      AvailabilityZone: 'eu-west-2a'
+      EngineVersion: 3.5.2
+      # KmsKeyId: alias/aws/dms # Using default AWS KMS Key
+      KmsKeyId: !FindInMap [ "KmsKeyArnToEnvironment", "KmsKeyArnToEnvironment", !Ref Environment ] # Using custom AWS KMS Key in mapping
+      MultiAZ: false
+      PreferredMaintenanceWindow: 'Sun:00:00-Sun:06:00'
+      PubliclyAccessible: true
+      RplicationInstanceClass: !If [ EnvironmentIsProd, "dms.t3.large", dms.t3.micro ]
+      ReplicationInstanceIdentifier: "${Environment}-dms-replication-instance"
+      ReplicationSubnetGroupIdentifier: !Ref DmsReplicationSubnetGroup
+      Tags:
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Ref '${Version}'
+      VpcSecurityGroupIds:
+        - sg-1234567
+
 Outputs:
+  DmsReplicationInstance:
+    Description: "The ARN of the DMS Replication Instance"
+    Value: !GetAtt DmsReplicationInstance.ReplicationInstanceArn
+
+  DmsReplicationInstancePublicIp:
+    Description: "Public IP address of the DMS Replication Instance"
+    Value: !GetAtt DmsReplicationInstance.ReplicationInstancePublicIpAddresses
+
+  DmsReplicationInstancePrivateIp:
+    Description: "Private IP address of the DMS Replication Instance"
+    Value: !GetAtt DmsReplicationInstance.ReplicationInstancePrivateIpAddresses
   
+  DmsReplicationSubnetGroupArn:
+    Description: "The ARN of the DMS Replication Subnet Group"
+    Value: !GetAtt DmsReplicationSubnetGroup.ReplicationSubnetGroupArn
