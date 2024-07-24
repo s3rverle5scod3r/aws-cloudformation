@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM CloudFormation deployment template for Amazon Elastic Container Registry (ECR) infrastructure as code (IaC).
+
+Parameters:
+  Alias:
+    Type: String
+    Default: s3rverle5scod3r
+  
+  #Environment
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - stage
+      - prod
+  
+  #Version, to be supplied in format : {release}.{major}.{minor} (0.0.1)
+  Version:
+    Type: String
+  
+Mappings:
+  #KMS key per environment for encryption/decryption
+  KmsKeyArnToEnvironment:
+    Environment:
+      dev: tbc
+      test: tbc 
+      stage: tbc
+      prod: tbc
+
+Conditions:
+  EnvironmentIsProd: !Equals [ !Ref Environment, prod ]
+  EnvironmentIsStageOrProd: !Or [ !Equals [ !Ref Environment, stage ], !Equals [ !Ref Environment, prod ] ]
+ 
+Resources:
+  
+Outputs:
+  
