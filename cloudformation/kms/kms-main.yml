@@ -22,19 +22,217 @@ Parameters:
     Type: String
   
 Mappings:
-  #KMS key per environment for encryption/decryption
-  KmsKeyArnToEnvironment:
+  # External Account Number for environment
+  ExternalAccountNumberArnToEnvironment:
+    # example format : arn:aws:iam::{AccountId}:root
     Environment:
-      dev: tbc
-      test: tbc 
-      stage: tbc
-      prod: tbc
+      DEV: tbc 
+      STAGE: tbc
+      PROD: tbc
+  
+  # External Account Role for environment
+  ExternalAccountRoleArnToEnvironment:
+    # example format : arn:aws:iam::{AccountId}:role/{RoleName}
+    Environment:
+      DEV: tbc
+      STAGE: tbc
+      PROD: tbc
 
 Conditions:
   EnvironmentIsProd: !Equals [ !Ref Environment, prod ]
   EnvironmentIsStageOrProd: !Or [ !Equals [ !Ref Environment, stage ], !Equals [ !Ref Environment, prod ] ]
  
 Resources:
-  
+  # KMS customer managed key for rest/transit use
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: KMS customer managed key for rest/transit use.
+      EnableKeyRotation: True
+      KeyPolicy: {
+        "Id": "key-consolepolicy-3",
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+              # Allow root account access to this key
+              "Sid": "RootAccountPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "AWS": "arn:aws:iam::{AccountId}:root"
+              },
+              "Action": "kms:*",
+              "Resource": "*"
+          },
+          {
+              # Allow SNS service to use the key
+              "Sid": "SNSPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "Service": "sns.amazonaws.com"
+              },
+              "Action": [
+                  "kms:GenerateDataKey",
+                  "kms:Encrypt",
+                  "kms:Decrypt"
+              ],
+              "Resource": "*"
+          },
+          {
+              # Allow SQS service to use the key
+              "Sid": "SQSPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "Service": "sqs.amazonaws.com"
+              },
+              "Action": [
+                  "kms:GenerateDataKey",
+                  "kms:Encrypt",
+                  "kms:Decrypt"
+              ],
+              "Resource": "*"
+          },
+          {
+              # Allow CloudWatch service to use the key
+              "Sid": "CloudWatchPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "Service": [
+                      "events.amazonaws.com",
+                      "cloudwatch.amazonaws.com"
+                  ] 
+              },
+              "Action": [
+                  "kms:GenerateDataKey",
+                  "kms:Encrypt",
+                  "kms:Decrypt"
+              ],
+              "Resource": "*"
+          },
+          {
+              # Allow specific lambda roles to use the key
+              "Sid": "LambdaPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "AWS": [
+                      { "Fn::Sub": "arn:aws:iam::{AccountId}:role/${Environment}-lambda-role-a" },
+                      { "Fn::Sub": "arn:aws:iam::{AccountId}:role/${Environment}-lambda-role-b" }
+                  ]
+              },
+              "Action": [
+                  "kms:Encrypt",
+                  "kms:Decrypt",
+                  "kms:ReEncrypt*",
+                  "kms:GenerateDataKey",
+                  "kms:DescribeKey"
+              ],
+              "Resource": "*"
+          },
+          {
+              # Allow specific lambda roles to grant access to use the key
+              "Sid": "LambdaGrantPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "AWS": [
+                      { "Fn::Sub": "arn:aws:iam::{AccountId}:role/${Environment}-lambda-role-a" },
+                      { "Fn::Sub": "arn:aws:iam::{AccountId}:role/${Environment}-lambda-role-b" }
+                  ]
+              },
+              "Action": [
+                  "kms:CreateGrant",
+                  "kms:ListGrants",
+                  "kms:RevokeGrant"
+              ],
+              "Resource": "*",
+              "Condition": {
+                  "Bool": {
+                      "kms:GrantIsForAWSResource": "true"
+                  }
+              }
+          },
+          {
+              # Allow specific kinesis roles to use the key
+              "Sid": "KinesisPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "AWS": [
+                      { "Fn::Sub": "arn:aws:iam::{AccountId}:role/${Environment}-kinesis-role-a" },
+                      { "Fn::Sub": "arn:aws:iam::{AccountId}:role/${Environment}-kinesis-role-b" }
+                  ]
+              },
+              "Action": [
+                  "kms:Encrypt",
+                  "kms:Decrypt",
+                  "kms:ReEncrypt*",
+                  "kms:GenerateDataKey",
+                  "kms:DescribeKey"
+              ],
+              "Resource": "*"
+          },
+          {
+              # Allow an external s3 bucket to bucket account access for s3 to s3 replication
+              "Sid": "ExternalS3ReplicationAccountPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "AWS": !FindInMap [ "ExternalAccountNumberArnToEnvironment", "Environment", !Ref Environment ]
+              },
+              "Action": [
+                  "kms:Encrypt",
+                  "kms:Decrypt",
+                  "kms:ReEncrypt*",
+                  "kms:GenerateDataKey",
+                  "kms:DescribeKey"
+              ],
+              "Resource": "*"
+          },
+          {
+              # Allow and external s3 bucket to bucket role access for s3 to s3 replication
+              "Sid": "ExternalS3ReplicationAccountPerms",
+              "Effect": "Allow",
+              "Principal": {
+                  "AWS": !FindInMap [ "ExternalAccountRoleArnToEnvironment", "Environment", !Ref Environment ]
+              },
+              "Action": [
+                  "kms:Encrypt",
+                  "kms:Decrypt",
+                  "kms:ReEncrypt*",
+                  "kms:GenerateDataKey",
+                  "kms:DescribeKey"
+              ],
+              "Resource": "*"
+          }
+        ]
+      }
+      KeyUsage: ENCRYPT_DECRYPT
+      PendingWindowInDays: 30
+
+  # KMS key alias
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${Environment}-customer-managed-kms-key'
+      TargetKeyId: !Ref KMSKey
+
 Outputs:
-  
+  KMSKeyArn:
+    Description: "The arn of the kms customer managed key."
+    Value: !GetAtt KMSKey.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-KMSKeyArn"
+
+  KMSKeyId:
+    Description: "The id of the kms customer managed key."
+    Value: !Ref KMSKey
+    Export:
+      Name: !Sub "${AWS::StackName}-KMSKeyId"
+
+  KMSKeyAliasArn:
+    Description: "The arn of the kms customer managed key alias."
+    Value: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/${Environment}-customer-managed-kms-key"
+    Export:
+      Name: !Sub "${AWS::StackName}-KMSKeyAliasArn"
+
+  KMSKeyAliasName:
+    Description: "The name of the kms customer managed key alias."
+    Value: !Ref KMSKeyAlias
+    Export:
+      Name: !Sub "${AWS::StackName}-KMSKeyAliasName"
