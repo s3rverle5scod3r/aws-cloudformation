@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: SAM CloudFormation deployment template for Amazon Relational Database Service (RDS) infrastructure as code (IaC).
+Description: SAM CloudFormation deployment template for Amazon Aurora Serverless Relational Database Service (RDS) infrastructure as code (IaC).
 
 Parameters:
   Alias:
@@ -21,9 +21,24 @@ Parameters:
   Version:
     Type: String
   
+  SubnetIds:
+    Type: String
+    Default: subnet-xxxxxx,subnet-yyyyyy,subnet-zzzzzz
+  
+  AuroraClusterIdentifier:
+    Type: String
+    Description: The identifier of the Aurora Serverless v2 cluster
+    Default: aurora-serverless-cluster
+
+  RootUserSecretArn:
+    Type: String
+    Description: The ARN of the RDS cluster root secret
+    Default: {secretArn}
+
 Mappings:
   #KMS key per environment for encryption/decryption
   KmsKeyArnToEnvironment:
+     # example format : arn:aws:kms:{Region}:{AccountId}:key/{KeyId}
     Environment:
       dev: tbc
       test: tbc 
@@ -33,8 +48,238 @@ Mappings:
 Conditions:
   EnvironmentIsProd: !Equals [ !Ref Environment, prod ]
   EnvironmentIsStageOrProd: !Or [ !Equals [ !Ref Environment, stage ], !Equals [ !Ref Environment, prod ] ]
- 
+
 Resources:
+  RdsDbClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParmeterGroup
+    Properties:
+      Description: Parameter group for Aurora Serverless RDS
+      Family: aurora-postgresql16
+      Parameters:
+        binlog_format: ROW
+        binlog_checksum: NONE
+      Tags: 
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Sub '${Version}'
+
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Aurora Serverless RDS Cluster
+      DBSubnetGroupName: "rds-subnet-group"
+      SubnetIds:
+        - subnet-1234a567
+        - subnet-1234b567
+        - subnet-1234c567
+      Tags:
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Ref '${Version}'
   
+  RdsDbCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      Engine: aurora-postgresql
+      DBClusterIdentifier: aurora-serverless-cluster
+      DBCLusterParameterGroup: !Ref RdsDbClusterParameterGroup
+      EngineVersion: 15.4
+      MasterUsername: rootUser
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${RootUserSecretArn}:SecretString}}'
+      StorageEncrypted: true
+      AvailabilityZones:
+        - eu-west-2a
+        - eu-west-2b
+      VpcSecurityGroups:
+        - sg-xxxxxx
+        - sg-yyyyyy
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 1
+        MaxCapacity: 2
+      Tags:
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Ref '${Version}'
+  
+  RdsDbInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref RdsDbCluster
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      AutoMinorUpgradeVersion: true
+      Tags:
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Ref '${Version}'
+  
+  RdsDbReadReplicaInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref RdsDbCluster
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      AutoMinorUpgradeVersion: true
+      Tags:
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Ref '${Version}'
+  
+  RdsProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DebugLogging: true
+      DBProxyName: AuroraServerlessRdsProxy
+      EngineFamily: POSTGRESQL
+      IdleClientTimeout: 120
+      RequireTLS: true
+      RoleArn: !GetAtt RdsProxyRole.Arn
+      Auth:
+        - {AuthScheme: SECRETS, SecretArn: !ImportValue RootUserSecretArn, IAMAuth: DISABLED}
+        - {AuthScheme: SECRETS, SecretArn: !ImportValue UserASecretArn, IAMAuth: DISABLED}
+        - {AuthScheme: SECRETS, SecretArn: !ImportValue UserBSecretArn, IAMAuth: DISABLED}
+      DebugLogging: true
+      VpcSubnetIds:
+        Fn::Split: [ ",", !Ref SubnetIds ]
+      Tags:
+        - Key: Alias
+          Value: !Ref Alias
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Version
+          Value: !Ref '${Version}'
+  
+  RdsProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principle": {
+              "Service": [
+                "dms.eu-west-2.amazonaws.com",
+                "rds.amazonaws.com",
+                "secretsmanager.eu-west-2.amazonaws.com"
+              ]
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    Policies:
+      - PolicyName: Aurora-Serverless-Rds-Proxy-Policy
+        PolicyDocument: {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid":"LogPerms",
+              "Effect": Allow,
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid":"Ec2Perms",
+              "Effect": Allow,
+              "Action": [
+                "ec2:CreateNetworkInterface",
+                "ec2:DeleteNetworkInterface",
+                "ec2:DescribeNetworkInterfaces"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid":"SecretsManagerPerms",
+              "Effect": Allow,
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid":"RdsPerms",
+              "Effect": Allow,
+              "Action": [
+                "RDS:DescribeDBInstances",
+                "RDS:DescribeDBClusters",
+                "RDS:DescribeDBClusterEndpoints"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+    Description: Role for Aurora Serverless Rds Proxy.
+    RoleName: 'Aurora-Serverless-Rds-Proxy-Role'
+    Tags:
+    - Key: Alias
+      Value: !Ref Alias
+    - Key: Environment
+      Value: !Ref Environment
+    - Key: Version
+      Value: !Ref '${Version}'
+  
+  RdsProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: RdsProxy
+      TargetGroupName: defualt
+      ConnectionPoolConfigurationInfo:
+        ConnectionBorrowTimeout: 120
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 50
+      DBClusterIdentifiers:
+        - !Ref AuroraClusterIdentifier
+
 Outputs:
+  RdsClusterEndpoint:
+    Description: "The endpoint address of the Aurora Serverless RDS cluster"
+    Value: !GetAtt RdsDbCluster.Endpoint.Address
+
+  RdsClusterReadEndpoint:
+    Description: "The read endpoint address of the Aurora Serverless RDS cluster"
+    Value: !GetAtt RdsDbCluster.ReadEndpoint.Address
+
+  RdsDbInstanceIdentifier:
+    Description: "The identifier of the Primary Aurora Serverless DB instance"
+    Value: !Ref RdsDbInstance
   
+  RdsDbReadReplicaInstanceIdentifier:
+    Description: "The identifier of the Read Replica Aurora Serverless DB instance"
+    Value: !Ref RdsDbReadReplicaInstance
+
+  RdsDbProxyEndpoint:
+    Description: "The endpoint of the Aurora Serverless RDS Proxy"
+    Value: !GetAtt RdsProxy.Endpoint
+
+  RdsProxyIamRoleArn:
+    Description: "The ARN of the Aurora Serverless RDS Proxy IAM Role"
+    Value: !GetAtt RdsProxyRole.Arn
+
+  RdsDbProxyTargetGroupArn:
+    Description: "The ARN of the Aurora Serverless RDS Proxy Target Group"
+    Value: !GetAtt RdsProxy.TargetGroupArn
