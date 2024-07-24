@@ -22,8 +22,17 @@ Parameters:
     Type: String
   
 Mappings:
+  LambdaArnToEnvironment:
+       # example format : arn:aws:lambda:{Region}:{AccountId}:function:{LambdaName}
+      Environment:
+        dev: tbc
+        test: tbc 
+        stage: tbc
+        prod: tbc
+  
   #KMS key per environment for encryption/decryption
   KmsKeyArnToEnvironment:
+     # example format : arn:aws:kms:{Region}:{AccountId}:key/{KeyId}
     Environment:
       dev: tbc
       test: tbc 
@@ -35,6 +44,40 @@ Conditions:
   EnvironmentIsStageOrProd: !Or [ !Equals [ !Ref Environment, stage ], !Equals [ !Ref Environment, prod ] ]
  
 Resources:
+  EventbridgeSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-eventbridge-rule-schedule'
+      Description: Eventbridge rule schedule.
+      ScheduleExpression: cron(0 12 ? * * *) # use https://crontab.cronhub.io/ to validate cron expression
+      State: ENABLED
+      Targets:
+        - Arn: !FindInMap [LambdaArnToEnvironment, "Environment", !Ref Environment ]
+          Id: "LambdaFunction"
+
+  LambdaPermissionForEventsToInvokeLambda:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !FindInMap [LambdaArnToEnvironment, "Environment", !Ref Environment ]
+        Action: 'lambda:InvokeFunction'
+        Principal: 'events.amazonaws.com'
+        SourceArn: !GetAtt EventbridgeSchedule.Arn
   
 Outputs:
-  
+  EventbridgeRuleArn:
+    Description: "The ARN of the eventbridge rule schedule"
+    Value: !GetAtt EventbridgeSchedule.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-EventbridgeRuleArn"
+
+  EventbridgeRuleName:
+    Description: "The name of the eventbridge rule schedule"
+    Value: !Ref EventbridgeSchedule
+    Export:
+      Name: !Sub "${AWS::StackName}-EventbridgeRuleName"
+
+  LambdaPermissionForEventsArn:
+    Description: "The ARN of the Lambda permission for eventbridge to invoke the Lambda function"
+    Value: !GetAtt LambdaPermissionForEventsToInvokeLambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaPermissionForEventsArn"
